@@ -1,0 +1,455 @@
+---
+title: "EMD539: Harmonic regression, Serfling, robust"
+author: "Kayoko Shioda and Dan Weinberger"
+date: "2/16/2022"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+library(ciTools)
+library(shiny)
+library(MASS)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+source('./R/harmonic_app.R')
+```
+
+## Set up 
+
+```{r loaddata}
+# Load a dataset
+us.pi <- read.csv("us_pi_mortality.csv")
+
+us.pi$date<-as.Date(paste(us.pi$year, us.pi$modeath, '01', sep='-'))
+```
+
+
+## Explore the US mortality data
+
+Today, we analyze use all-cause mortality data in the U.S. in 1980-2001. The following variables are included in the dataset:
+
+* modeath (=month of death)
+* year (=4-digit)
+* date (fractional year: Year + (modeath-1)/12)
+* all (=monthly number of deaths for all cause mortality)
+* season (=winter season)
+
+```{r}
+head(us.pi)
+```
+
+*Question:*
+How many months are included in this dataset? How can we quickly tell that?
+
+```{r nummonths, eval=F}
+nrow(us.pi)
+
+unique(us.pi$date)
+```
+
+Time series for the number of all-cause mortality:
+When you make a plot, it is important to pay attention to its y axis. Below, I added `ylim()` to extend y axis to zero, which is a good practice when we make plots. 
+```{r tsplot1}
+
+p1 <- ggplot(us.pi, aes(x=date, y=all)) +
+  geom_line() +
+  theme_classic() +
+  ylab("Number of all-cause deaths") +
+  ylim(0, max(us.pi$all))
+
+p1
+```
+
+*Question:*
+What do you see? Any trend in all-cause mortality?
+
+
+
+
+
+## Today's goal
+
+1. Control for annual seasonality in time series by including harmonic terms (since and cosine waves).
+
+2. Fit a serfling regression model.
+
+3. Fit a robust regression model.
+
+
+## Regression models with harmonic terms
+
+In this section, we will fit a regression model with annual seasonality using sine & cosine waves:
+
+$$ log(Y) = \beta_0 + \beta_1  t + \beta_2 sin(\frac{2\pi t}{12}) + \beta_3 cos(\frac{2\pi t}{12}) $$
+
+where t represents time index (1, 2, ...., number of data points). We will take a log of the outcome (i.e., number of all-cause deaths) in order to make the distribution look normal. 
+
+
+*Question*
+Why are denominators 12? If we were using weekly data, what would it be?
+
+
+### Review: Trigonometric function
+
+**Example 1:** Basic sine and cosine (Annual seasonality)
+
+```{r ex1}
+# Create month index
+x <- 0:50 # Month 0 to 50
+
+# Create sine and cosine waves for annual oscillation
+Ysine <- sin(2*pi*x/12) # Denominator is 12 because there are 12 months in a year
+Ycos  <- cos(2*pi*x/12)
+
+# Plot annual waves
+plot(Ysine ~ x, type="l", col="blue", main="Example 1: Annual seasonality")
+lines(x,Ycos,type="l",col="red")
+abline(h=c(-1,0,1), lty=2, col="darkgrey")
+abline(v=seq(0,50,12), lty=2, col="darkgrey")
+```
+
+**Example 2:** Variations on a sine wave
+
+You can change the height of this sine curve and/or frequency of oscillations as follows:
+
+```{r period.slider, echo=FALSE}
+harmonic_app()
+```
+
+*Question*
+If we want to include harmonic terms for biennial oscillation (i.e., peaks appearing every other year), what should the denominator be?
+
+**Example 3:** Combination of sine and cosine waves
+
+By combining sine and cosine waves, you can change the height and/or shift the phase.
+
+```{r ex3}
+x <- 0:50
+Ysine <- sin(2*pi*x/12)
+Combo <- sin(2*pi*x/12) + cos(2*pi*x/12)
+Combo2 <- sqrt(1.75)*sin(2*pi*x/12) + 0.5*cos(2*pi*x/12)
+
+# Plot
+plot(x,  Ysine,  type="l", ylim=c(-1.75,1.75))
+lines(x, Combo,  type="l", col="blue")
+lines(x, Combo2, type="l", col="red")
+```
+
+
+## Regression models with harmonic terms
+
+Let's fit a regression model with annual seasonality by following the next steps.
+
+1. Create time index variables.
+
+```{r tindex}
+# Number of months in your data
+n_months <- nrow(us.pi) 
+
+# Term for linear time trend
+us.pi$t_1 <- seq(1, n_months) 
+
+# Term for quadratic time trend.
+us.pi$t_2 <- us.pi$t_1^2 
+```
+
+NOTE: Including quadratic (t_1^2), cubic (t_1^3), etc., variables gives you a more flexible curve shape.
+
+2. Create harmonic terms for annual seasonality.
+
+```{r Harmonic}
+# As we are using monthly data today, the denominator is 12. For weekly data, denominator would be 52 for annual seasonality.
+us.pi$sin12 <- sin(2*us.pi$t_1*pi/12) 
+us.pi$cos12 <- cos(2*us.pi$t_1*pi/12)
+```
+
+adding in additional seasonality terms (e.g. with 6 month harmonic) allows the model to better capture the shape of teh seasonal curve. We can use model selectionc criteria to decide whether to include 24 month, or 6 or 3 monh harmonics as well. Typically the sine and cosine terms of a particular frequency go as a pair: they are both included or both excluded from the model.
+
+```{r}
+us.pi$sin6 <- cos(2*us.pi$t_1*pi/6) 
+us.pi$cos6 <- sin(2*us.pi$t_1*pi/6)
+
+us.pi$sin3 <- cos(2*us.pi$t_1*pi/3) 
+us.pi$cos3 <- sin(2*us.pi$t_1*pi/3)
+```
+
+3. Fit a Poisson regression with glm(). Evaluate appropriateness of Poisson by looking at residual deviance/degrees of freedom. Ratio of these should be ~1. If >>1, use negative binomial or quasi-Poisson model.
+
+```{r}
+model.harmonic.pois <- glm( all ~  sin12 + cos12 + sin6+cos6+ sin3+cos3 +t_1    , 
+                      na.action=na.exclude, 
+                      data=us.pi, family='poisson')
+summary(model.harmonic.pois)
+
+```
+
+3b. Fit a Negative binomial regression with annual harmonic terms using `glm.nb()`, and take a look at summary results by `summary()`
+
+```{r loglin2}
+model.harmonic <- glm.nb( all ~  sin12 + cos12 + sin6+cos6+ sin3+cos3 +t_1    , 
+                      na.action=na.exclude, 
+                      data=us.pi)
+summary(model.harmonic)
+
+
+```
+
+
+
+
+*Question:*
+Let's interpret the results. Where can you find estimated coefficients for predictors?
+
+4. Generate predicted values from the model using `add_pi()`, and plot cases and the model fit. In `predict()`, `interval` should be "prediction" instead of "confidence", because we want to obtain 95% prediction interval (PI).
+
+```{r predharmonic}
+# Generate prediction and prediction interval
+pred_harmonic <- add_pi(us.pi, fit=model.harmonic, yhatName = "pred", alpha=0.05 )
+
+head(pred_harmonic) # What are these numbers?
+
+```
+
+```{r}
+# What's generated by predict()?
+
+# Make a plot
+# Add observed data
+
+p1 +
+  geom_ribbon(data=pred_harmonic, 
+          aes(ymin=LPB0.025,ymax=UPB0.975), fill="blue", alpha=0.5) +
+  geom_line(data=pred_harmonic, aes(x=date, y=pred), col='gray', lty=2)
+  
+  
+```
+
+## Model comparison
+Evaluate AIC scores from these 4 models and choose the most parsimonious. Typically when comparing AIC scores, smaller is better. A difference of 2 points is considered meaningful, so models that have a difference of AIC <2 are considred equivalent, and the simpler of the models would usually be selected.
+
+```{r}
+mod1 <- glm.nb( all ~  sin12 + cos12 + sin6+cos6+ sin3+cos3 +t_1    , 
+                      na.action=na.exclude, 
+                      data=us.pi)
+
+mod2 <- glm.nb( all ~  sin12 + cos12 + sin6+cos6 +t_1    , 
+                      na.action=na.exclude, 
+                      data=us.pi)
+
+mod3 <- glm.nb( all ~  sin12 + cos12 + sin6+cos6 +t_1    , 
+                      na.action=na.exclude, 
+                      data=us.pi)
+
+mod4 <-  glm.nb( all ~  sin12 + cos12 + sin6+cos6+ sin3+cos3 +t_1 + t_2   , 
+                      na.action=na.exclude, 
+                      data=us.pi)
+AIC(mod1)
+AIC(mod2)
+AIC(mod3)
+AIC(mod4)
+
+```
+
+
+
+## Serfling regression models
+
+Follow the next steps to fit a serfling regression model.
+
+1. Let's flag winter months (that won't be included in the baseline) using `ifelse()`. 
+
+For the purpose of this analysis, Dec-Apr are considered "winter months" and will be labeled winter=1, and May-Nov will be winter=0.
+
+```{r winter}
+winter.months <-c(12,1,2,3)
+
+us.pi$winter <- ifelse(us.pi$modeath %in% winter.months, 1, 0)
+
+# Check
+us.pi[1:24, c('modeath','winter')]
+```
+
+2. Create a baseline all-cause mortality variable ("bl.all") with values for baseline months and NA for winter months.
+
+```{r baseline}
+us.pi$bl.all <- ifelse(us.pi$winter==1, NA, us.pi$all)
+
+# Check
+us.pi[1:24,c('year','modeath','winter','all','bl.all')] 
+```
+
+3. Create the model of baseline mortality to obtain a baseline estimate.
+
+```{r baselinereg}
+# Fit a model of baseline mortality
+model.bl <- glm.nb(bl.all ~ t_1 + sin12+cos12 ,  data=us.pi)
+
+# Summary result
+summary(model.bl)
+```
+
+4. Generate predicted values.
+
+```{r predbaseline}
+us.pi.fit<-us.pi
+us.pi.fit$bl.all<-us.pi$all
+serfling.ds <- add_pi(us.pi.fit, fit=model.bl, alpha=0.1 )
+```
+
+5. Create a TRUE/FALSE variable ("epi95") that defines "epidemic months". 
+
+Epidemic months are months where the following two conditions are met:
+    A) Deaths are above the 95% baseline confidence limit, and 
+    B) The month is in the winter season 
+
+```{r epimonths}
+serfling.ds$epi95 <- (serfling.ds$all > serfling.ds$UPB0.95 & serfling.ds$modeath %in% c(12,1,2,3) ) # This will create a "logical" vector (TRUE vs. FALSE)
+
+# Check
+class(serfling.ds$epi95)
+serfling.ds[1:24,c('date','all','UPB0.95','winter','epi95')] 
+```
+
+Now let's take a look at a result by creating a time series plot.
+
+```{r plotserf}
+
+p2 <- p1 +
+  geom_ribbon(data=serfling.ds, 
+          aes(ymin=pred,ymax=UPB0.95), fill="blue", alpha=0.5) +
+  geom_line(data=serfling.ds, aes(x=date, y=pred), col='red', lty=2) +
+  ggtitle('Serfling regression')
+
+p2
+```
+
+6. Calculate monthly excess deaths above the baseline during epidemic months.
+
+```{r monthlyexcessdeaths}
+
+# Calculate excess death during epidemic months
+serfling.ds$ex.all <- (serfling.ds$all - serfling.ds$pred)*(serfling.ds$epi95) 
+
+# Check
+serfling.ds[1:24, c('all','pred','winter','epi95','ex.all')]
+
+# Plot
+p3.excess <- ggplot(serfling.ds, aes(x=date, y=ex.all)) + 
+  geom_line() +
+  theme_classic() +
+  ylab('Number of Excess Deaths')
+p3.excess
+```
+
+7. Sum all excess deaths during epidemic months to obtain seasonal excess deaths.
+
+We will round off to the nearest hundred. You should avoid presenting false precision in your summaries
+
+```{r seasonalexcessdeaths}
+excessN_serfling <- serfling.ds[excessN$season!='',] %>%
+  group_by(season) %>%
+  summarize('Excess_deaths_serfling'=round(sum(ex.all),-2),'N_epidemic_months'=sum(epi95)) 
+
+head(excessN_serfling)
+
+htmlTable::htmlTable(excessN_serfling)
+
+# You can also export the excess.table data into .csv file if needed
+write.csv(excessN_serfling,"./outputs/summary_excess_mortality_1980_2001.csv")  
+```
+
+
+## Robust regression 
+
+Follow the next steps to fit a robust regression model.
+
+1. Load a required package. 
+
+```{r rlmpackage}
+require(MASS)
+```
+
+2. Fit a robust regression using `rlm()`.
+
+```{r rlm}
+rr <- rlm(log(all) ~ t_1 +  sin12 + cos12  , data =us.pi)
+```
+
+3. Generate predicted values.
+
+```{r predrlm, fig.width=8}
+# Generate prediction (Use 90% PI instead of 95% PI) 
+pred.rr.robust <- exp(predict(rr, us.pi, se.fit=TRUE, interval="prediction", level=0.90)[[1]])
+
+pred.rr.robust <- cbind.data.frame(us.pi, pred.rr.robust)
+
+p3 <- p1 +
+ geom_ribbon(data=pred.rr.robust, 
+          aes(ymin=fit,ymax=upr), fill="blue", alpha=0.5) +
+  geom_line(data=pred.rr.robust, aes(x=date, y=fit), col='red', lty=2) +
+  ggtitle('Robust regression')
+
+gridExtra::grid.arrange(p2, p3, ncol=2)
+```
+
+4. Create a TRUE/FALSE variable that defines epidemic months (i.e., Deaths are above the **90%** baseline confidence limit and the month is in the winter season.)
+
+```{r epimonths2}
+epi.rr <- (us.pi$all > pred.rr.robust$upr & us.pi$winter==1)
+```
+
+5. Calculate excess deaths per month.
+
+```{r monthlyexcessrlm}
+pred.rr.robust$excessN <- (us.pi$all - pred.rr.robust$fit) 
+```
+
+6. Sum all excess deaths during epidemic months to obtain seasonal excess deaths.
+
+```{r seasonalexcessdeaths2}
+# Sums excess mortality over each epidemic season (which includes 2 years)
+
+excessN_robust <- pred.rr.robust[pred.rr.robust$season!='',] %>%
+  group_by(season) %>%
+  summarize('Excess_deaths_robust'=round(sum(excessN),-2)) 
+
+head(excessN_robust)
+
+htmlTable::htmlTable(excessN_robust)
+
+# You can also export the excess.table data into .csv file if needed
+write.csv(excessN_robust,"./outputs/summary_excess_mortality_robust_1980_2001.csv")  
+
+
+```
+
+## Compare serfling and robust regression estimates for exess cases
+```{r}
+
+comp1 <- merge(excessN_robust, excessN_serfling, by='season')
+
+htmlTable::htmlTable((comp1))
+
+plot(comp1$Excess_deaths_robust, comp1$Excess_deaths_serfling, 
+     xlab='Excess N (robust)', 
+     ylab='Excess N (Serfling)' ,
+     bty='l',
+     xlim=c(0, max(comp1$Excess_deaths_serfling)),
+     ylim=c(0, max(comp1$Excess_deaths_serfling)))
+abline(a=0, b=1)
+```
+
+## Summary
+These examples show us how to fit seasonal regressions to all cause mortality data from the US. We use harmonics to adjust for seasonality and polynomials to adjust for underlying long-term trends. In this exmaple, the analysis is done retrospectively to evaluate the burden of spikes in disease in the winter months (due to influenza or other respiratory pathogens). To prevent previous epidemics from skewing our baselinemwe can either fit a robust regression fit to all of the data, or we can fit a Serfing regression, where we exclude certain months where we expect to have epidemics and interpolate the missing months. We also fit a negative binomial regression where we included all of the months (rather than excluding the winter mnths, as in Serfling regression) In some instances, the 3 approaches will give very similar baselines. If there is a strong epidemic in the historic period, this could skew the baselines.
+
+As with other approaches (e.g. historical limits, Farrington), we can adjust the stringency of the epidemic threshold by modifying the width of the predictions intervals (fiddle with alpha). 
+
+In these examples, the analyses are performed retrospectively. In reality, the same approach can be applied prospectively, fitting the model to available data and performing 1 step ahead prediction. The model could be refit as more data become available or at some specified interval (e.g. quarterly)
+
