@@ -25,7 +25,7 @@ source('./R/harmonic_app.R')
 
 ```{r loaddata}
 # Load a dataset
-us.pi <- read.csv("us_pi_mortality.csv")
+us.pi <- read.csv("./Data/us_pi_mortality.csv")
 
 us.pi$date<-as.Date(paste(us.pi$year, us.pi$modeath, '01', sep='-'))
 ```
