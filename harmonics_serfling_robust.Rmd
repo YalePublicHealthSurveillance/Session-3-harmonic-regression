@@ -337,8 +337,10 @@ p2
 # Calculate excess death during epidemic months
 serfling.ds$ex.all <- (serfling.ds$all - serfling.ds$pred)*(serfling.ds$epi95) 
 
+serfling.ds$ex.all2 <- (serfling.ds$all - serfling.ds$pred)*(serfling.ds$winter) 
+
 # Check
-serfling.ds[1:24, c('all','pred','winter','epi95','ex.all')]
+serfling.ds[1:24, c('all','pred','winter','epi95','ex.all','ex.all2')]
 
 # Plot
 p3.excess <- ggplot(serfling.ds, aes(x=date, y=ex.all)) + 
@@ -353,9 +355,9 @@ p3.excess
 We will round off to the nearest hundred. You should avoid presenting false precision in your summaries
 
 ```{r seasonalexcessdeaths}
-excessN_serfling <- serfling.ds[excessN$season!='',] %>%
+excessN_serfling <- serfling.ds[serfling.ds$season!='',] %>%
   group_by(season) %>%
-  summarize('Excess_deaths_serfling'=round(sum(ex.all),-2),'N_epidemic_months'=sum(epi95)) 
+  summarize('Excess_deaths_serfling'=round(sum(ex.all),-2),'Excess_deaths_serfling_incl_negatives'=round(sum(ex.all2),-2),'N_epidemic_months'=sum(epi95)) 
 
 head(excessN_serfling)
 
@@ -443,6 +445,14 @@ plot(comp1$Excess_deaths_robust, comp1$Excess_deaths_serfling,
      bty='l',
      xlim=c(0, max(comp1$Excess_deaths_serfling)),
      ylim=c(0, max(comp1$Excess_deaths_serfling)))
+abline(a=0, b=1)
+
+plot(comp1$Excess_deaths_robust, comp1$Excess_deaths_serfling_incl_negatives, 
+     xlab='Excess N (robust)', 
+     ylab='Excess N (Serfling)' ,
+     bty='l',
+     xlim=c(min(c(0,min(comp1$Excess_deaths_serfling_incl_negatives))), max(comp1$Excess_deaths_serfling_incl_negatives)),
+     ylim=c(0, max(comp1$Excess_deaths_serfling_incl_negatives)))
 abline(a=0, b=1)
 ```
 
